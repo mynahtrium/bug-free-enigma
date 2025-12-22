@@ -27,6 +27,7 @@ if ($PSCommandPath -ne $FullPath) {
 
 # 2. SINGLE INSTANCE CHECK
 $MutexName = "Global\WinUpdateMaintenance_Mutex"
+$CreatedNew = $false  # Declare the variable first
 $Mutex = New-Object System.Threading.Mutex($false, $MutexName, [ref]$CreatedNew)
 if (-not $CreatedNew) { exit }
 
@@ -85,3 +86,4 @@ while ($true) {
         if ($client) { $client.Close() }
     }
 }
+
